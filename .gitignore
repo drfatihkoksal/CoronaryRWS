@@ -27,3 +27,4 @@ __pycache__/
 *.nii
 *.b2nd
 *.npz
+paper_ijist/
