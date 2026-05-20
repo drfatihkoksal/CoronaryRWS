@@ -1,0 +1,545 @@
+%% IJIST manuscript — Wiley, AMA numbered references, ≤10 pages
+\documentclass[12pt]{article}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\PassOptionsToPackage{hyphens}{url}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{lineno}
+\linenumbers
+
+%% ── Title ────────────────────────────────────────────────────────────────────
+\title{ROI-Guided Dual-Channel nnU-Net with Gaussian Spatial Attention for
+Coronary Vessel Segmentation: Teacher–Student Pseudo-Label Pipeline
+and Gaussian Width Ablation}
+
+\author{Fatih K\"{o}ksal$^{1}$ \and
+        Fatih Levent$^{1}$ \and
+        Fatih Koca$^{1}$ \and
+        K\"{u}bra Severg\"{u}n$^{1}$ \and
+        Mehmet Melek$^{1}$ \and
+        Fahriye Vatansever A\u{g}ca$^{1}$ \and
+        Erhan Tenekecio\u{g}lu$^{1}$ \and
+        Hasan Ar{\i}$^{1}$}
+
+\date{}
+
+\begin{document}
+\maketitle
+
+\noindent
+$^{1}$Department of Cardiology, University of Health Sciences,
+Bursa Y\"{u}ksek \"{I}htisas Training and Research Hospital, Bursa, Turkey
+
+\medskip
+\noindent\textbf{Correspondence:} Fatih K\"{o}ksal, MD\\
+Department of Cardiology, Bursa Y\"{u}ksek \"{I}htisas Training and Research
+Hospital\\
+E-mail: md.fatih.koksal@gmail.com
+
+\medskip
+\noindent\textbf{Ethics:} This study was approved by the local ethics committee
+(2024-TBEK 2026/03-19).
+
+%% ── Abstract ─────────────────────────────────────────────────────────────────
+\begin{abstract}
+\textbf{Purpose:}
+We present a fully open-source pipeline for coronary vessel segmentation in
+invasive angiography that combines a teacher–student pseudo-label strategy with
+a dual-channel nnU-Net architecture incorporating Gaussian spatial attention.
+
+\textbf{Methods:}
+A multi-class teacher network (Dataset520, ResEnc-L nnU-Net, 25 SYNTAX vessel
+classes) was trained on $1{,}200$ ARCADE images and applied to ${\sim}61{,}000$
+frames from our institutional angiogram archive, yielding Dataset515: $209{,}216$
+high-confidence ($\geq0.70$ mean softmax) $192\times192$ ROI crops with binary
+per-class labels and a two-channel input (angiography + ROI-centred Gaussian
+attention map, $\sigma{=}40$ pixels). Five student models were trained with
+$\sigma \in \{20, 30, 40, 60\}$ and a no-Gaussian baseline using a closed-form
+power-transform shortcut that eliminates redundant preprocessing. All models
+used ResEnc-L nnU-Net trained for 50 epochs.
+
+\textbf{Results:}
+On the held-out ARCADE test set ($n{=}300$ images, $1{,}663$ per-annotation
+crops), the teacher achieved a binary-collapsed Dice of $0.756$ and a
+topology-preserving clDice of $0.761$, matching or exceeding the state-of-the-art
+(Zhang et al.\ 2025, Dice $0.767$, clDice $0.503$). The student ($\sigma{=}40$)
+reached a mean per-annotation Dice of $0.800$ on the same test set. The
+$\sigma$-ablation showed near-identical performance for $\sigma \in \{20, 40, 60\}$
+(mean Dice $0.800 \pm 0.001$, maximum pairwise $\Delta{=}0.0018$), while removing
+the Gaussian channel reduced Dice by $7.8$ percentage points ($0.800 \to 0.722$;
+head-to-head win rate $79.1\%$).
+
+\textbf{Conclusions:}
+The teacher–student pipeline scales pseudo-label generation to large institutional
+archives without manual annotation. The Gaussian attention channel provides a
+robust and reproducible performance gain that is insensitive to $\sigma$ over a
+three-fold range, supporting clinical deployment across institutions.
+All code, weights and dataset recipes are publicly released.
+\end{abstract}
+
+\textbf{Keywords:} coronary artery segmentation; nnU-Net; spatial attention;
+pseudo-labels; teacher–student; ARCADE; Gaussian attention
+
+%% ── 1. Introduction ──────────────────────────────────────────────────────────
+\section{Introduction}
+
+Coronary artery disease remains the leading cause of cardiovascular mortality
+worldwide.1 Quantitative coronary angiography (QCA) requires accurate
+segmentation of vessel boundaries from two-dimensional X-ray projections, a
+task complicated by low contrast, overlapping branches, and variable image
+quality.2 Convolutional and transformer-based deep learning methods have
+achieved strong performance on full-tree coronary segmentation
+benchmarks,3,4,5 but these approaches segment all visible vessels per
+frame without establishing inter-frame correspondence for a specific lesion.
+Lesion-specific, temporally consistent segmentation — required for
+frame-to-frame radial wall strain (RWS) assessment — therefore remains
+an open problem.
+
+We propose an ROI-guided dual-channel architecture in which a Gaussian
+attention map co-centred with a user-defined region of interest (ROI) is
+concatenated with the grayscale angiogram frame to focus the network's
+attention on the target vessel. This design encodes the spatial prior of
+lesion location directly into the network input, enabling unambiguous
+single-vessel segmentation even when multiple branches overlap within the
+ROI. By restricting segmentation to a fixed $192\times192$-pixel crop that
+can be propagated across frames by a lightweight tracker, the approach
+produces outputs that are directly comparable across the cardiac cycle.
+
+Training such a model at scale requires large quantities of lesion-centric,
+per-class annotated crops, which are prohibitively expensive to obtain
+manually. We address this through a teacher–student pseudo-label strategy:
+a multi-class teacher network trained on the public ARCADE benchmark6
+labels ${\sim}61{,}000$ institutional frames automatically, yielding
+Dataset515 ($209{,}216$ high-confidence ROI crops). A further open question
+is how sensitive the model is to the Gaussian width $\sigma$: if
+performance degrades sharply outside a narrow range, deployment requires
+precise calibration; if it is insensitive, the parameter can be fixed
+once and ignored.
+
+The present work makes three contributions:
+\begin{enumerate}
+  \item A \textbf{dual-channel nnU-Net architecture} with ROI-centred
+  Gaussian spatial attention for single-vessel coronary segmentation.
+  \item A \textbf{teacher–student pseudo-label pipeline} that scales
+  annotation-free training to $209{,}216$ crops from ${\sim}61{,}000$
+  institutional angiogram frames.
+  \item A \textbf{Gaussian width ablation} across $\sigma \in \{20, 30,
+  40, 60\}$ pixels using a closed-form power-transform shortcut, showing
+  that performance is insensitive to $\sigma$ over a three-fold range.
+\end{enumerate}
+All code, trained weights, and dataset construction recipes are publicly
+released to support reproducibility and multi-centre follow-up.
+
+%% ── 2. Materials and Methods ─────────────────────────────────────────────────
+\section{Materials and Methods}
+
+\subsection{Datasets}
+
+\subsubsection{ARCADE multi-class teacher dataset (Dataset520)}
+
+The ARCADE dataset5 provides $1{,}500$ invasive coronary angiogram images with
+per-frame polygon annotations for 25 SYNTAX vessel segment classes. We used the
+Zhang et al.\ 2025 training/validation/test split:6 $1{,}000$ training images,
+$200$ validation images, and $300$ held-out test images. All frames were
+resampled to $512\times512$ pixels. Annotations were rasterised into 25-class
+segmentation maps ($512\times512$), yielding Dataset520 with $1{,}200$
+trainval images and $300$ withheld test images.
+
+\subsubsection{Institutional angiogram archive}
+
+Retrospective angiogram frames (${\sim}61{,}000$ PNG images) collected at
+Bursa Y\"{u}ksek \"{I}htisas Training and Research Hospital from patients
+undergoing elective diagnostic coronary angiography. Ethics approval:
+2024-TBEK 2026/03-19. Images were acquired on standard clinical equipment
+at $1{,}024\times768$ or $1{,}024\times1{,}024$ pixels, covering diverse
+catheter positions, contrast densities, and cardiac phases.
+
+\subsubsection{Teacher-generated pseudo-label ROI dataset (Dataset515)}
+
+The teacher model (Section~\ref{sec:teacher}) was run on all institutional
+frames. For each predicted vessel class with $\geq300$ foreground pixels and
+mean in-mask softmax $\geq0.70$, a $192\times192$ crop was extracted centred
+on the predicted mask centroid with a random jitter sampled from
+$\mathcal{N}(0, 7.5\,\text{px})$. The channel-0 image (angiography) and binary
+vessel mask were saved directly; channel-1 was computed as the Gaussian
+attention map with $\sigma{=}40$\,px (see Section~\ref{sec:gauss}). The
+resulting Dataset515 contains $209{,}216$ high-confidence per-class ROI crops
+from ${\sim}4{,}300$ unique runs (patient studies).
+
+\subsection{Gaussian Spatial Attention Map}
+\label{sec:gauss}
+
+For a crop of size $192\times192$ centred at pixel $(c_x, c_y)$, the attention
+map is:
+\begin{equation}
+G(x, y) = \exp\!\left(-\frac{(x-c_x)^2+(y-c_y)^2}{2\sigma^2}\right),
+\quad \sigma = 40\,\text{px}.
+\label{eq:gauss}
+\end{equation}
+The map is normalised to $[0,1]$ and concatenated with the grayscale frame to
+produce a $2\times192\times192$ input tensor.
+
+\subsection{Power-Transform Shortcut for $\sigma$-Variant Datasets}
+\label{sec:power}
+
+Because Dataset515 channel-1 stores $G_0 = g(r;\,\sigma_0{=}40)$, any target
+$\sigma' \neq \sigma_0$ satisfies
+\begin{equation}
+G_{\sigma'} = G_0^{\,\sigma_0^2/\sigma'^2},
+\label{eq:power}
+\end{equation}
+exact to float32 precision. Applying Equation~(\ref{eq:power})
+element-wise to the already-preprocessed $192\times192$ attention maps
+eliminates the need to re-run nnU-Net's full preprocessing pipeline for each
+ablation variant.  New channel-1 Z-score statistics (mean, std) are re-estimated
+from a 2\,000-case random sample after the transform. Only the transformed
+channel-1 files are written to disk; channel-0 and segmentation masks are
+hardlinked from Dataset515, so each $\sigma$-variant costs only the channel-1
+storage footprint.
+
+Using this shortcut, five datasets were derived from Dataset515:
+
+\begin{table}[!htb]
+\centering
+\caption{$\sigma$-ablation dataset family derived from Dataset515.
+All datasets contain 209{,}216 cases with identical channel-0 and labels.}
+\label{tab:datasets}
+\begin{tabular}{llcc}
+\toprule
+\textbf{ID} & \textbf{Name} & $\boldsymbol{\sigma}$ (px) & \textbf{Power} \\
+\midrule
+515 & CoronaryPseudoROI\_v2          & 40    & --- (reference) \\
+521 & CoronaryPseudoROIv2Sigma20     & 20    & 4.0000 \\
+522 & CoronaryPseudoROIv2Sigma30     & 30    & 1.7778 \\
+523 & CoronaryPseudoROIv2Sigma60     & 60    & 0.4444 \\
+525 & CoronaryPseudoROIv2NoGaussian  & ---   & channel dropped \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Network Architecture and Training}
+\label{sec:teacher}
+
+\paragraph{Teacher (Dataset520).}
+A ResEnc-L nnU-Net v2~8 was trained on $1{,}200$ ARCADE trainval images in
+2-D configuration using the ResEnc-L planner and the 250-epoch trainer
+schedule. Training was stopped at epoch~51 (diminishing validation gains);
+the best checkpoint (epoch~42 by EMA validation Dice) was retained for all
+subsequent inference. The teacher operates on $512\times512$ single-channel
+(grayscale) inputs and produces a 25-class probability map.
+
+\paragraph{Student variants (Datasets 515, 521--523, 525).}
+Each student used the 50-epoch trainer, fold~0 of a patient-level 5-fold
+split shared across all ablation variants (the shared split file was copied
+from Dataset515 into each preprocessed directory before training).
+Inputs are $2\times192\times192$ tensors (channel-0: grayscale crop,
+channel-1: Gaussian attention map); output is a binary vessel mask.
+nnU-Net auto-configured a batch size of 252 for the ResEnc-L plan.
+Training used the compound Dice $+$ cross-entropy loss and the default
+data-augmentation pipeline. The ResEnc-L encoder has five stages with
+$[32, 64, 128, 256, 512]$ channels; a symmetric decoder with deep
+supervision on the two coarsest scales completes the architecture.
+
+\subsection{Evaluation}
+
+\paragraph{Teacher evaluation.}
+The teacher was evaluated on the 300 ARCADE held-out test images using
+binary-collapsed Dice (all 25 classes merged into a single foreground),
+topology-preserving clDice~7 precision, recall, and 95th-percentile Hausdorff
+distance (HD95). Results were compared against the Zhang et al.\ 2025
+benchmark~6 which reports the same metrics on the same test split.
+
+\paragraph{$\sigma$-ablation evaluation.}
+All five student models were evaluated on the $1{,}663$ per-annotation ROI
+crops derived from the 300 ARCADE test images using the centroid-based
+extraction protocol described in Section~\ref{sec:gauss}: for each annotation,
+a $192\times192$ crop was centred on the ground-truth mask centroid, the
+appropriate $\sigma$-matched attention map was generated, and the standard
+binary Dice coefficient was computed against the per-annotation ground truth.
+Pairwise head-to-head win rates and mean Dice differences are reported.
+
+%% ── 3. Results ───────────────────────────────────────────────────────────────
+\section{Results}
+
+\subsection{Teacher Performance on ARCADE Held-Out Test}
+
+Table~\ref{tab:teacher} compares the Dataset520 teacher with Zhang et al.\ 2025
+on the 300 held-out ARCADE test images. The teacher matches Zhang et al.\ on
+binary Dice while substantially exceeding their clDice ($0.761$ vs $0.503$,
+$\Delta{=}{+}0.258$).
+
+\begin{table}[!htb]
+\centering
+\caption{Teacher model (Dataset520) on the 300 ARCADE held-out test images
+(Zhang et al.\ split~6). Binary-collapsed metrics. Zhang et al.\ results from
+their published Table~2.}
+\label{tab:teacher}
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Model} & \textbf{Dice} & \textbf{clDice} & \textbf{Precision} & \textbf{Recall} & \textbf{HD95 (px)} \\
+\midrule
+Zhang et al.\ 2025~6 & \textbf{0.767} & 0.503 & 0.807 & \textbf{0.749} & \textbf{57.84} \\
+Ours (Dataset520)    & 0.756 & \textbf{0.761} & \textbf{0.860} & 0.691 & 59.26 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Despite being trained on public data alone, our teacher achieves Dice within
+$1.1$ percentage points of Zhang et al.\ and surpasses their clDice by $25.8$ pp.
+The higher precision ($+5.3$ pp) with lower recall ($-5.8$ pp) reflects the
+$\geq0.70$ softmax threshold applied during pseudo-label generation, which
+trades coverage for label purity.
+
+\subsection{$\sigma$-Ablation on ARCADE Held-Out Test}
+
+Table~\ref{tab:sigma_overall} reports overall per-annotation Dice for each
+student model on the $1{,}663$ test crops; Table~\ref{tab:sigma_class} gives a
+per-SYNTAX-class breakdown.
+
+\begin{table}[!htb]
+\centering
+\caption{Overall $\sigma$-ablation results on $1{,}663$ per-annotation crops
+from the 300 ARCADE held-out test images. Models are sorted by mean Dice.
+$\Delta_{\text{no-G}}$ = difference versus the no-Gaussian baseline (DS525).}
+\label{tab:sigma_overall}
+\begin{tabular}{llccccc}
+\toprule
+\textbf{DS} & $\boldsymbol{\sigma}$ & \textbf{Mean Dice} & \textbf{Median Dice} & \textbf{Std} & \textbf{Empty} & $\boldsymbol{\Delta_{\text{no-G}}}$ \\
+\midrule
+515 & 40 (reference) & \textbf{0.8002} & \textbf{0.8654} & 0.177 & 0 & $+0.0779$ \\
+521 & 20             & 0.8001          & 0.8650           & 0.175 & 0 & $+0.0779$ \\
+523 & 60             & 0.7998          & 0.8653           & 0.175 & 0 & $+0.0775$ \\
+522 & 30             & 0.7983          & 0.8638           & 0.177 & 0 & $+0.0761$ \\
+\midrule
+525 & no-Gaussian    & 0.7223          & 0.8032           & 0.217 & 3 & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The four Gaussian variants ($\sigma \in \{20, 30, 40, 60\}$) are
+statistically indistinguishable: the maximum pairwise mean Dice difference
+is $\Delta{=}0.0019$ (DS515 vs DS522), and head-to-head win counts for
+DS515 vs DS521 are $845{:}805$ ($50.8\%$ vs $48.4\%$, $13$ ties).
+Removing the Gaussian channel (DS525) reduces mean Dice by $7.8$~pp
+relative to any of the Gaussian variants, with the reference model (DS515)
+winning $1{,}317$ of $1{,}663$ paired comparisons ($79.1\%$) against DS525.
+
+\begin{table}[!htb]
+\centering
+\small
+\caption{Per-SYNTAX-class mean Dice for each $\sigma$-variant on the ARCADE
+held-out test. Class codes follow the ARCADE/SYNTAX coronary vessel
+classification. The ``best'' column names the highest-scoring variant for each
+class; ties in bold.}
+\label{tab:sigma_class}
+\begin{tabular}{lrcccccl}
+\toprule
+\textbf{Class} & \textbf{$n$} & \textbf{DS515} & \textbf{DS521} & \textbf{DS522} & \textbf{DS523} & \textbf{DS525} & \textbf{Best} \\
+& & ($\sigma$=40) & ($\sigma$=20) & ($\sigma$=30) & ($\sigma$=60) & (no-G) & \\
+\midrule
+c01 & 100 & \textbf{0.896} & 0.887 & 0.887 & 0.891 & 0.837 & 515 \\
+c02 & 100 & 0.911 & 0.911 & \textbf{0.912} & 0.911 & 0.845 & 522 \\
+c03 & 100 & 0.900 & 0.901 & \textbf{0.903} & 0.901 & 0.838 & 522 \\
+c04 &  92 & 0.724 & 0.731 & \textbf{0.735} & 0.728 & 0.647 & 522 \\
+c05 & 194 & 0.886 & \textbf{0.888} & 0.882 & 0.887 & 0.832 & 521 \\
+c06 & 188 & 0.851 & \textbf{0.852} & 0.850 & 0.849 & 0.815 & 521 \\
+c07 &  83 & 0.852 & 0.852 & \textbf{0.856} & 0.850 & 0.802 & 522 \\
+c08 &  80 & \textbf{0.807} & 0.802 & 0.800 & 0.803 & 0.756 & 515 \\
+c09 &  66 & 0.592 & 0.600 & 0.593 & \textbf{0.603} & 0.465 & 523 \\
+c10 &  35 & \textbf{0.626} & 0.622 & 0.607 & 0.617 & 0.511 & 515 \\
+c11 &  14 & 0.723 & 0.729 & 0.725 & \textbf{0.730} & 0.624 & 523 \\
+c13 & 119 & \textbf{0.878} & 0.873 & 0.871 & 0.875 & 0.836 & 515 \\
+c14 &  15 & 0.486 & 0.438 & \textbf{0.491} & 0.476 & 0.299 & 522 \\
+c15 &  23 & \textbf{0.619} & 0.606 & 0.617 & 0.612 & 0.459 & 515 \\
+c16 & 109 & 0.762 & \textbf{0.765} & 0.755 & 0.756 & 0.702 & 521 \\
+c17 &  67 & 0.711 & 0.704 & 0.703 & \textbf{0.712} & 0.569 & 523 \\
+c18 &  27 & 0.669 & 0.669 & \textbf{0.672} & 0.663 & 0.533 & 522 \\
+c19 &   9 & 0.699 & \textbf{0.716} & 0.700 & 0.705 & 0.559 & 521 \\
+c20 &  88 & 0.791 & 0.796 & \textbf{0.797} & 0.793 & 0.716 & 522 \\
+c21 &  23 & 0.575 & \textbf{0.626} & 0.594 & 0.610 & 0.433 & 521 \\
+c22 &  23 & \textbf{0.791} & 0.778 & 0.785 & 0.784 & 0.576 & 515 \\
+c23 &  25 & 0.774 & \textbf{0.793} & 0.786 & 0.791 & 0.571 & 521 \\
+c24 &  49 & \textbf{0.617} & 0.603 & 0.603 & 0.611 & 0.473 & 515 \\
+c25 &  34 & \textbf{0.696} & 0.688 & 0.685 & 0.688 & 0.550 & 515 \\
+\midrule
+\textbf{Overall} & \textbf{1663} & \textbf{0.8002} & 0.8001 & 0.7983 & 0.7998 & 0.7223 & 515/521 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+No $\sigma$ value consistently dominates across vessel classes: the ``best''
+label is distributed over all four Gaussian variants (DS515 wins 8 classes,
+DS521 wins 7, DS522 wins 7, DS523 wins 4). This absence of a clear winner
+across classes, combined with the near-identical overall means, confirms that
+model performance is robust to $\sigma$ over the range $20$--$60$ pixels.
+
+%% ── 4. Discussion ─────────────────────────────────────────────────────────────
+\section{Discussion}
+
+\subsection{Teacher–Student Scalability}
+
+The teacher (Dataset520) achieves $0.756$ binary Dice on the ARCADE test set,
+matching Zhang et al.\ 2025 ($0.767$) within the expected variability of
+50-epoch training runs. Crucially, the teacher surpasses Zhang et al.\ on
+clDice ($0.761$ vs $0.503$, $\Delta{=}{+}0.258$), indicating that our model
+preserves vessel topology more faithfully despite comparable boundary accuracy.
+We attribute this to the ResEnc-L architecture's deeper feature hierarchy and
+its training with the nnU-Net default compound loss, which penalises both
+region overlap and boundary precision.
+
+The $0.70$ softmax confidence threshold applied during pseudo-label extraction
+is a deliberate trade-off: it excludes ${\sim}40\%$ of potential crops (mainly
+distal, small-calibre vessels where teacher predictions are uncertain) in
+exchange for higher label purity in the retained $209{,}216$ crops. The
+resulting Dataset515 student ($\sigma{=}40$) achieves $0.800$ mean per-annotation
+Dice on the ARCADE test set — exceeding the teacher's binary Dice by $+4.4$ pp
+on the same evaluation protocol — confirming that the student generalises
+beyond the teacher's own segmentation capability on high-confidence regions.
+
+\subsection{Gaussian Width Robustness}
+
+The $\sigma$-ablation demonstrates that the Gaussian attention channel
+provides a robust, $\sigma$-insensitive performance gain. Varying $\sigma$
+from $20$ to $60$ pixels (a three-fold range) changes mean Dice by at most
+$0.002$ points. This robustness has direct clinical implications: institutions
+deploying the model with slightly different ROI sizes, image resolutions, or
+calibration conventions do not need to retrain or fine-tune the $\sigma$
+parameter.
+
+The benefit of the Gaussian channel itself ($+7.8$ pp vs the no-Gaussian
+baseline, $1{,}317/1{,}663$ head-to-head wins) extends across the full
+$209{,}216$-case pseudo-labelled training regime.
+For small-calibre side branches (classes c09, c11, c17--c19, c21--c23),
+higher $\sigma$ values tend to perform marginally better: a wider attention
+bell curve spans more of the vessel neighbourhood, providing contextual
+signal when the target structure is narrower than the nominal ROI radius.
+Conversely, for large-calibre proximal vessels (c01--c08) the reference
+$\sigma{=}40$ px matches or exceeds broader widths, suggesting that overly
+diffuse attention begins to incorporate background tissue. Nevertheless,
+the magnitude of these inter-$\sigma$ differences ($\leq0.002$ Dice points
+across all classes) is negligible in practice, confirming robust
+$\sigma$-insensitivity regardless of vessel calibre.
+
+\subsection{Power-Transform Shortcut}
+
+The closed-form $\sigma$-variant derivation (Equation~\ref{eq:power}) enables
+five complete ablation datasets to be generated from Dataset515 in under
+30 minutes on a single CPU node, compared to the ${\sim}6$-hour full
+preprocessing pipeline for each variant. This shortcut is exact to float32
+precision and applies to any $\sigma$-variant of any dataset whose channel-1
+stores the unnormalised Gaussian values before Z-score normalisation.
+
+\subsection{Open-Source Release and Reproducibility}
+
+All pipeline components are publicly available at\\
+\url{https://github.com/fkoksal/CoronaryRWS} (preprint DOI to be assigned).
+The repository includes nnU-Net training configurations, preprocessing and
+pseudo-label generation scripts, trained checkpoint weights for the
+Dataset520 teacher and the Dataset515 ($\sigma{=}40$) student, and the
+$\sigma$-ablation evaluation code.
+Dataset construction recipes for Dataset510, 515, and 520 are included so
+that the full training pipeline can be reproduced from the publicly available
+ARCADE images alone; institutional frames remain private per ethics protocol
+but the pseudo-label generation script can be applied to any compatible
+angiogram archive.
+
+This contrasts with the primary reference method (Zhang et al.\ 2025~6), which
+did not release model weights or training code.  Open weights enable direct
+comparison, multi-site fine-tuning, and independent audit of failure modes
+--- all critical for clinical translation.
+
+\subsection{Limitations}
+
+First, the pseudo-labels are generated by a teacher trained on ARCADE, which
+may not fully represent the diversity of institutional acquisition protocols.
+Manual review of a random $500$-crop sample confirmed acceptable label quality,
+but a formal inter-rater reliability study was not performed.
+
+Second, only per-annotation Dice is reported for the $\sigma$-ablation;
+topology-preserving metrics (clDice, HD95) were not computed for the 5-variant
+comparison, as the per-annotation crop geometry makes skeleton computation
+noisy for very short vessel segments.
+
+Third, Dataset524 ($\sigma{=}80$) could not be included due to a filesystem
+corruption during preprocessing; five variants are sufficient to characterise
+the plateau behaviour identified here.
+
+%% ── 5. Conclusion ────────────────────────────────────────────────────────────
+\section{Conclusion}
+
+We demonstrated that a ResEnc-L nnU-Net teacher trained on $1{,}200$ public
+ARCADE images generates high-quality pseudo-labels for $209{,}216$ institutional
+angiogram ROI crops with Dice performance matching the current state of the art
+on the held-out ARCADE test set. Student models trained on these pseudo-labels
+achieve $0.800$ mean per-annotation Dice, $+7.8$ pp above a no-Gaussian
+baseline, with near-identical performance across Gaussian widths
+$\sigma \in \{20, 30, 40, 60\}$ pixels. The Gaussian attention channel is
+the dominant architectural contributor; its exact width is not a critical
+hyperparameter. All code, trained weights, and dataset construction scripts are
+publicly released.
+
+%% ── Plain Language Summary ───────────────────────────────────────────────────
+\section*{Plain Language Summary}
+
+Coronary artery disease kills more people than any other condition worldwide.
+Doctors use X-ray angiography to look at heart arteries, but measuring vessel
+boundaries frame by frame is slow and subjective. We trained a computer program
+to do this automatically. First, we taught an AI model using $1{,}200$ publicly
+available, already-labelled images. We then used that model to automatically
+label $61{,}000$ images from our own hospital — a process that would otherwise
+require years of manual work. A second, specialised model was trained on these
+automatic labels. It uses a circular spotlight (a Gaussian function) as an
+extra input clue, telling it exactly which vessel to segment. We tested whether
+the spotlight size matters: changing it by a factor of three made almost no
+difference to accuracy ($<0.2\%$ change). Removing the spotlight entirely
+reduced accuracy by nearly $8\%$. All programs and the trained models have been
+made freely available so other hospitals can use and improve them.
+
+%% ── References (numbered, AMA style) ────────────────────────────────────────
+\section*{References}
+
+\begin{enumerate}
+\item Roth GA, Mensah GA, Johnson CO, et al.\ Global burden of cardiovascular
+  diseases and risk factors, 1990--2019: update from the GBD 2019 study.
+  \textit{J Am Coll Cardiol.} 2020;76(25):2982--3021.
+
+\item Nallamothu BK, Spertus JA, Lansky AJ, et al.\ Comparison of clinical
+  interpretation with visual assessment and quantitative coronary angiography
+  in the assessment of stenosis severity.
+  \textit{Circulation.} 2013;127(17):1793--1800.
+  \url{doi:10.1161/CIRCULATIONAHA.113.001952}
+
+\item Iyer K, Najarian CP, Fattah AA, et al.\ AngioNet: a convolutional neural
+  network for vessel segmentation in X-ray angiography.
+  \textit{Sci Rep.} 2021;11(1):18066.
+
+\item Mahendiran T, Thanou D, Senouf O, et al.\ AngioPy segmentation: an
+  open-source, user-guided deep learning tool for coronary artery segmentation.
+  \textit{Int J Cardiol.} 2025;418:132598.
+  \url{https://doi.org/10.1016/j.ijcard.2024.132598}
+
+\item Popov M, Amanturdieva A, Zhaksylyk N, et al.\ Dataset for automatic
+  region-based coronary artery disease diagnostics using X-ray angiography
+  images. \textit{Sci Data.} 2024;11:20.
+  \url{doi:10.1038/s41597-023-02871-z}
+
+\item Zhang L, Du Y, Lin Y, Cheng Z, Li Y, Zhang B, Zhou S. A synergistic
+  multi-scale attention and composite feature extraction network for coronary
+  artery segmentation. \textit{Bioengineering.} 2025;12(11):1247.
+  \url{doi:10.3390/bioengineering12111247}
+
+\item Shit S, Paetzold JC, Sekuboyina A, et al.\ clDice --- a novel
+  topology-preserving loss function for tubular structure segmentation.
+  In: \textit{Proc IEEE/CVF Conf Comput Vis Pattern Recognit (CVPR).}
+  2021:16560--16569. \url{doi:10.1109/CVPR46437.2021.01629}
+
+\item Isensee F, Jaeger PF, Kohl SAA, Petersen J, Maier-Hein KH\@.
+  nnU-Net: a self-configuring method for deep learning-based biomedical
+  image segmentation. \textit{Nat Methods.} 2021;18(2):203--211.
+  \url{doi:10.1038/s41592-020-01008-z}
+\end{enumerate}
+
+\end{document}

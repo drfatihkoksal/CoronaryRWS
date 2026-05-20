@@ -1,0 +1,29 @@
+# Large data directories
+nnunet_raw/Dataset*/
+nnunet_preprocessed/
+nnunet_results/
+predictions/
+logs/
+figures/
+viz_samples/
+
+# Paper build artefacts
+paper_ijist/*.aux
+paper_ijist/*.log
+paper_ijist/*.out
+paper_ijist/*.pdf
+paper_ijist/*.synctex.gz
+
+# Internal project notes
+CLAUDE.md
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Data files
+*.nii.gz
+*.nii
+*.b2nd
+*.npz
